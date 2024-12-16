@@ -30,7 +30,20 @@ export default function Watch(props: { name: string }) {
 		// TODO remove this when WebTransport correctly supports self-signed certificates
 		const fingerprint = server.startsWith("localhost") ? `https://${server}/fingerprint` : undefined
 
-		Player.create({ url, fingerprint, canvas, namespace }, tracknum).then(setPlayer).catch(setError)
+		Player.create({ url, fingerprint, canvas, namespace }, tracknum)
+			.then((player) => {
+				setPlayer(player)
+				player.addEventListener("play", () => console.log("Received play event"))
+				player.addEventListener("pause", () => console.log("Received pause event"))
+				player.addEventListener("loadeddata", () => console.log("Received loadeddata event"))
+				player.addEventListener("volumechange", () => console.log("Received volumechange event"))
+				player.addEventListener("unsubscribestared", () => console.log("Received unsubscribestared event"))
+				player.addEventListener("unsuscribedone", () => console.log("Received unsuscribedone event"))
+				player.addEventListener("subscribestared", () => console.log("Received subscribestared event"))
+				player.addEventListener("suscribedone", () => console.log("Received suscribedone event"))
+				player.addEventListener("waitingforkeyframe", () => console.log("Received waitingforkeyframe event"))
+			})
+			.catch(setError)
 	})
 
 	const mute = (state: boolean) => {

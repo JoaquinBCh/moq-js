@@ -15,7 +15,17 @@
 		var player = null;
 		moqplayer.create(config, 1).then((p) => {
 			player = p;
+			player.addEventListener("play", () => console.log("Received play event"))
+			player.addEventListener("pause", () => console.log("Received pause event"))
+			player.addEventListener("loadeddata", () => console.log("Received loadeddata event"))
+			player.addEventListener("volumechange", () => console.log("Received volumechange event"))
+			player.addEventListener("unsubscribestared", () => console.log("Received unsubscribestared event"))
+			player.addEventListener("unsuscribedone", () => console.log("Received unsuscribedone event"))
+			player.addEventListener("subscribestared", () => console.log("Received subscribestared event"))
+			player.addEventListener("suscribedone", () => console.log("Received suscribedone event"))
+			player.addEventListener("waitingforkeyframe", () => console.log("Received waitingforkeyframe event"))
 		});
+		
 		playButton.addEventListener("click", () => {
 			player.play();
 		});

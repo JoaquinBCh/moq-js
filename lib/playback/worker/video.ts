@@ -27,6 +27,7 @@ export class Renderer {
 
 	#decoderConfig?: DecoderConfig
 	#waitingForKeyframe: boolean = true
+	#hasSentWaitingForKeyFrameEvent: boolean = false
 
 	constructor(config: Message.ConfigVideo, timeline: Component) {
 		this.#canvas = config.canvas
@@ -128,12 +129,17 @@ export class Renderer {
 		if (this.#decoder.state == "configured") {
 			if (this.#waitingForKeyframe && !frame.sample.is_sync) {
 				console.warn("Skipping non-keyframe until a keyframe is found.")
+				if (!this.#hasSentWaitingForKeyFrameEvent) {
+					self.postMessage("waitingforkeyframe")
+					this.#hasSentWaitingForKeyFrameEvent = true
+				}
 				return
 			}
 
 			// On arrival of a keyframe, allow decoding and stop waiting for a keyframe.
 			if (frame.sample.is_sync) {
 				this.#waitingForKeyframe = false
+				this.#hasSentWaitingForKeyFrameEvent = false
 			}
 
 			const chunk = new EncodedVideoChunk({
