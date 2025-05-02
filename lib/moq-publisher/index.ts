@@ -120,7 +120,9 @@ export class PublisherMoq extends HTMLElement {
 			const opts: PublisherOptions = {
 				url: this.getAttribute("src")!,
 				fingerprintUrl: this.getAttribute("fingerprint")!,
-				namespace: [...(this.getAttribute("namespace")! || crypto.randomUUID())],
+				namespace: [
+					this.getAttribute("namespace")! || crypto.randomUUID()
+				  ],
 				media: this.mediaStream,
 				video: videoConfig,
 				audio: audioConfig,
