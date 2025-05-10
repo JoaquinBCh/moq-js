@@ -6,7 +6,7 @@ import MediaWorker from "web-worker:./worker/index.ts"
 
 import { RingShared } from "../common/ring"
 import { Root, isAudioTrack } from "../media/catalog"
-import { GroupHeader } from "../transport/objects"
+import { SubgroupHeader } from "../transport/objects"
 
 export interface PlayerConfig {
 	canvas: OffscreenCanvas
@@ -24,10 +24,13 @@ export default class Backend {
 	// The audio context, which must be created on the main thread.
 	#audio?: Audio
 
-	constructor(config: PlayerConfig) {
+	#eventTarget: EventTarget
+
+	constructor(config: PlayerConfig, eventTarget: EventTarget) {
 		// TODO does this block the main thread? If so, make this async
 		this.#worker = new MediaWorker()
 		this.#worker.addEventListener("message", this.on.bind(this))
+		this.#eventTarget = eventTarget
 
 		let sampleRate: number | undefined
 		let channels: number | undefined
@@ -106,11 +109,9 @@ export default class Backend {
 	}
 
 	private on(e: MessageEvent) {
-		const msg = e.data as Message.FromWorker
-
-		// Don't print the verbose timeline message.
-		if (!msg.timeline) {
-			//console.log("received message from worker to main", msg)
+		const msg = e.data
+		if (msg === "waitingforkeyframe") {
+			this.#eventTarget.dispatchEvent(new Event("waitingforkeyframe"))
 		}
 	}
 }
@@ -123,7 +124,7 @@ export interface Init {
 export interface Segment {
 	init: string // name of the init track
 	kind: "audio" | "video"
-	header: GroupHeader
+	header: SubgroupHeader
 	buffer: Uint8Array
 	stream: ReadableStream<Uint8Array>
 }

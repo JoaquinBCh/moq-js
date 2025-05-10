@@ -7,7 +7,7 @@ import { asError } from "../common/error"
 import Backend from "./backend"
 
 import { Client } from "../transport/client"
-import { GroupReader } from "../transport/objects"
+import { SubgroupReader } from "../transport/objects"
 
 export type Range = Message.Range
 export type Timeline = Message.Timeline
@@ -20,7 +20,7 @@ export interface PlayerConfig {
 }
 
 // This class must be created on the main thread due to AudioContext.
-export default class Player {
+export default class Player extends EventTarget {
 	#backend: Backend
 
 	// A periodically updated timeline
@@ -42,16 +42,19 @@ export default class Player {
 	#abort!: (err: Error) => void
 	#trackTasks: Map<string, Promise<void>> = new Map()
 
-	private constructor(connection: Connection, catalog: Catalog.Root, backend: Backend, tracknum: number) {
+	private constructor(connection: Connection, catalog: Catalog.Root, tracknum: number, canvas: OffscreenCanvas) {
+		super()
 		this.#connection = connection
 		this.#catalog = catalog
 		this.#tracksByName = new Map(catalog.tracks.map((track) => [track.name, track]))
-		this.#backend = backend
 		this.#tracknum = tracknum
 		this.#audioTrackName = ""
 		this.#videoTrackName = ""
 		this.#muted = false
 		this.#paused = false
+		this.#backend = new Backend({ canvas, catalog }, this)
+		super.dispatchEvent(new CustomEvent("catalogupdated", { detail: catalog }))
+		super.dispatchEvent(new CustomEvent("loadedmetadata", { detail: catalog }))
 
 		const abort = new Promise<void>((resolve, reject) => {
 			this.#close = resolve
@@ -63,6 +66,7 @@ export default class Player {
 
 		this.#run().catch((err) => {
 			console.error("Error in #run():", err)
+			super.dispatchEvent(new CustomEvent("error", { detail: err }))
 			this.#abort(err)
 		})
 	}
@@ -71,23 +75,24 @@ export default class Player {
 		const client = new Client({ url: config.url, fingerprint: config.fingerprint, role: "subscriber" })
 		const connection = await client.connect()
 
-		const catalog = await Catalog.fetch(connection, config.namespace)
+		const catalog = await Catalog.fetch(connection, [config.namespace])
 		console.log("catalog", catalog)
 
 		const canvas = config.canvas.transferControlToOffscreen()
-		const backend = new Backend({ canvas, catalog })
 
-		return new Player(connection, catalog, backend, tracknum)
+		return new Player(connection, catalog, tracknum, canvas)
 	}
 
 	async #run() {
+		// Key is "/" serialized namespace for lookup ease
+		// Value is Track.initTrack. @todo: type this properly
 		const inits = new Set<[string, string]>()
 		const tracks = new Array<Catalog.Track>()
 
 		this.#catalog.tracks.forEach((track, index) => {
 			if (index == this.#tracknum || Catalog.isAudioTrack(track)) {
 				if (!track.namespace) throw new Error("track has no namespace")
-				if (track.initTrack) inits.add([track.namespace, track.initTrack])
+				if (track.initTrack) inits.add([track.namespace.join("/"), track.initTrack])
 				tracks.push(track)
 			}
 		})
@@ -103,7 +108,7 @@ export default class Player {
 	}
 
 	async #runInit(namespace: string, name: string) {
-		const sub = await this.#connection.subscribe(namespace, name)
+		const sub = await this.#connection.subscribe([namespace], name)
 		try {
 			const init = await Promise.race([sub.data(), this.#running])
 			if (!init) throw new Error("no init data")
@@ -127,8 +132,6 @@ export default class Player {
 		const kind = Catalog.isVideoTrack(track) ? "video" : Catalog.isAudioTrack(track) ? "audio" : "unknown"
 		if (kind == "audio" && this.#muted) return
 
-		const sub = await this.#connection.subscribe(track.namespace, track.name)
-
 		if (kind == "audio") {
 			// Save ref to last audio track we subscribed to for unmuting
 			this.#audioTrackName = track.name
@@ -138,12 +141,15 @@ export default class Player {
 			this.#videoTrackName = track.name
 		}
 
+		let eventOfFirstSegmentSent = false
+		const sub = await this.#connection.subscribe(track.namespace, track.name)
+
 		try {
 			for (;;) {
 				const segment = await Promise.race([sub.data(), this.#running])
 				if (!segment) continue
 
-				if (!(segment instanceof GroupReader)) {
+				if (!(segment instanceof SubgroupReader)) {
 					throw new Error(`expected group reader for segment: ${track.name}`)
 				}
 
@@ -153,6 +159,11 @@ export default class Player {
 
 				if (!track.initTrack) {
 					throw new Error(`no init track for segment: ${track.name}`)
+				}
+
+				if (!eventOfFirstSegmentSent && kind == "video") {
+					super.dispatchEvent(new Event("loadeddata"))
+					eventOfFirstSegmentSent = true
 				}
 
 				const [buffer, stream] = segment.stream.release()
@@ -166,7 +177,12 @@ export default class Player {
 				})
 			}
 		} catch (error) {
-			console.error("Error in #runTrack:", error)
+			if (error instanceof Error && error.message.includes("cancelled")) {
+				console.log("Cancelled subscription to track: ", track.name)
+			} else {
+				console.error("Error in #runTrack:", error)
+				super.dispatchEvent(new CustomEvent("error", { detail: error }))
+			}
 		} finally {
 			await sub.close()
 		}
@@ -184,6 +200,7 @@ export default class Player {
 
 		task.catch((err) => {
 			console.error(`Error to subscribe to track ${track.name}`, err)
+			super.dispatchEvent(new CustomEvent("error", { detail: err }))
 		}).finally(() => {
 			this.#trackTasks.delete(track.name)
 		})
@@ -214,6 +231,14 @@ export default class Player {
 		return this.#paused
 	}
 
+	get muted(): boolean {
+		return this.#muted
+	}
+
+	get videoTrackName(): string {
+		return this.#videoTrackName
+	}
+
 	async switchTrack(trackname: string) {
 		const currentTrack = this.getCurrentTrack()
 		if (this.#paused) {
@@ -227,8 +252,8 @@ export default class Player {
 			console.log(`Subscribing to track: ${trackname}`)
 		}
 		this.#tracknum = this.#catalog.tracks.findIndex((track) => track.name === trackname)
-		const tracksToStream = this.#catalog.tracks.filter((track) => track.name === trackname)
-		await Promise.all(tracksToStream.map((track) => this.#runTrack(track)))
+
+		this.subscribeFromTrackName(trackname)
 	}
 
 	async mute(isMuted: boolean) {
@@ -242,22 +267,27 @@ export default class Player {
 			this.subscribeFromTrackName(this.#audioTrackName)
 			await this.#backend.unmute()
 		}
+		super.dispatchEvent(new CustomEvent("volumechange", { detail: { muted: isMuted } }))
 	}
 
 	async unsubscribeFromTrack(trackname: string) {
 		console.log(`Unsubscribing from track: ${trackname}`)
+		super.dispatchEvent(new CustomEvent("unsubscribestared", { detail: { track: trackname } }))
 		await this.#connection.unsubscribe(trackname)
 		const task = this.#trackTasks.get(trackname)
 		if (task) {
 			await task
 		}
+		super.dispatchEvent(new CustomEvent("unsubscribedone", { detail: { track: trackname } }))
 	}
 
 	subscribeFromTrackName(trackname: string) {
 		console.log(`Subscribing to track: ${trackname}`)
 		const track = this.#tracksByName.get(trackname)
 		if (track) {
+			super.dispatchEvent(new CustomEvent("subscribestared", { detail: { track: trackname } }))
 			this.#runTrack(track)
+			super.dispatchEvent(new CustomEvent("subscribedone", { detail: { track: trackname } }))
 		} else {
 			console.warn(`Track ${trackname} not in #tracksByName`)
 		}
@@ -281,6 +311,7 @@ export default class Player {
 		try {
 			await this.#running
 		} catch (e) {
+			console.error("Error in Player.closed():", e)
 			return asError(e)
 		}
 	}
@@ -295,6 +326,15 @@ export default class Player {
 	}
 	*/
 
+	// Added this to divide play and pause into two different functions
+	async togglePlayPause() {
+		if (this.#paused) {
+			await this.play()
+		} else {
+			await this.pause()
+		}
+	}
+
 	async play() {
 		if (this.#paused) {
 			this.#paused = false
@@ -304,12 +344,18 @@ export default class Player {
 				await this.#backend.unmute()
 			}
 			this.#backend.play()
-		} else {
+			super.dispatchEvent(new CustomEvent("play", { detail: { track: this.#videoTrackName } }))
+		}
+	}
+
+	async pause() {
+		if (!this.#paused) {
 			this.#paused = true
-			this.#backend.pause()
 			const mutePromise = this.#backend.mute()
 			const audioPromise = this.unsubscribeFromTrack(this.#audioTrackName)
 			const videoPromise = this.unsubscribeFromTrack(this.#videoTrackName)
+			super.dispatchEvent(new CustomEvent("pause", { detail: { track: this.#videoTrackName } }))
+			this.#backend.pause()
 			await Promise.all([mutePromise, audioPromise, videoPromise])
 		}
 	}
